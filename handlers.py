@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes, ConversationHandler
@@ -8,8 +9,12 @@ import database as db
 
 logger = logging.getLogger(__name__)
 
-# Constante para o ConversationHandler
+# Constantes para os ConversationHandlers
 AGUARDAR_NUMERO = 1
+AGUARDAR_TELEFONE = 2
+
+# Validação de número de telefone
+PHONE_REGEX = re.compile(r'^\+?[\d\s\-]{9,15}$')
 
 # ADMIN_ID carregado uma vez no arranque
 ADMIN_ID = os.getenv('ADMIN_ID')
@@ -18,6 +23,7 @@ ADMIN_ID = os.getenv('ADMIN_ID')
 def get_main_menu_keyboard(user_id=None):
     keyboard = [
         [InlineKeyboardButton("🏆 Ver Torneios", callback_data='ver_torneios')],
+        [InlineKeyboardButton("👤 Meu Perfil", callback_data='perfil')],
         [InlineKeyboardButton("ℹ️ Ajuda", callback_data='ajuda')]
     ]
     if ADMIN_ID and str(user_id) == str(ADMIN_ID):
@@ -245,7 +251,7 @@ async def send_tournament_update_to_group(context: ContextTypes.DEFAULT_TYPE, to
     if not torneio:
         return
 
-    nome, vagas = torneio
+    nome, vagas, _ = torneio
     todos_inscritos = db.get_inscritos_nomes(torneio_id)
     titulares = [(n, p) for n, p, s in todos_inscritos if not s]
     suplentes = [(n, p) for n, p, s in todos_inscritos if s]
@@ -275,10 +281,35 @@ async def sair_torneio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
     torneio_id = int(query.data.split('_')[1])
-    
+
+    # Verificar se o jogador era titular antes de remover
+    inscricao = db.get_inscricao_info(user_id, torneio_id)
+    era_titular = inscricao is not None and not inscricao[1]
+
     removido = db.remove_inscricao(user_id, torneio_id)
-    
+
     if removido:
+        # Se era titular, promover o primeiro suplente automaticamente
+        if era_titular:
+            suplente = db.get_primeiro_suplente(torneio_id)
+            if suplente:
+                suplente_id, suplente_nome = suplente
+                db.promover_suplente(suplente_id, torneio_id)
+                torneio = db.get_torneio(torneio_id)
+                torneio_nome = torneio[0] if torneio else "Torneio"
+                try:
+                    await context.bot.send_message(
+                        chat_id=suplente_id,
+                        text=(
+                            f"🎉 Boa notícia, {suplente_nome}! "
+                            f"Passaste a <b>titular</b> no torneio <b>{torneio_nome}</b>! "
+                            f"Uma vaga abriu e és o primeiro na lista de suplentes."
+                        ),
+                        parse_mode='HTML'
+                    )
+                except Exception as e:
+                    logger.warning(f"Não foi possível notificar suplente {suplente_id}: {e}")
+
         await query.answer("Inscrição cancelada.")
         texto, keyboard = get_tournament_details(torneio_id)
         await query.edit_message_text(texto, reply_markup=keyboard, parse_mode='HTML')
@@ -292,14 +323,67 @@ async def ajuda(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     texto = (
         "<b>ℹ️ Ajuda</b>\n\n"
-        "1. Vai a 'Meu Perfil' para definir o teu nível.\n"
-        "2. Consulta 'Ver Torneios' para veres jogos disponíveis.\n"
-        "3. Inscreve-te apenas em torneios do teu nível.\n"
-        "4. Diverte-te!\n\n"
+        "1. Vai a <b>Meu Perfil</b> para registares o teu telefone — assim os teus parceiros podem encontrar-te.\n"
+        "2. Consulta <b>Ver Torneios</b> para veres os jogos disponíveis.\n"
+        "3. Inscreve-te individualmente ou com parceiro (por número de telefone).\n"
+        "4. Se o torneio estiver cheio, podes entrar como suplente e serás promovido automaticamente se abrir vaga.\n"
+        "5. Diverte-te! 🎾\n\n"
         "Dúvidas? Contacta o admin."
     )
     keyboard = [get_back_button()]
     await query.edit_message_text(texto, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+
+async def perfil(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    user = query.from_user
+    jogador = db.get_jogador(user.id)
+    telefone = jogador[2] if jogador and jogador[2] else "Não registado"
+
+    texto = (
+        f"👤 <b>O teu Perfil</b>\n\n"
+        f"Nome: {user.full_name}\n"
+        f"Telefone: <code>{telefone}</code>\n\n"
+        f"O teu número permite que parceiros te encontrem ao inscreverem-se em torneios."
+    )
+    keyboard = [
+        [InlineKeyboardButton("📱 Atualizar Telefone", callback_data='atualizar_telefone')],
+        get_back_button()
+    ]
+    await query.edit_message_text(texto, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+
+async def atualizar_telefone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "📱 Por favor, envia o teu número de telefone (ex: <code>912345678</code>):",
+        parse_mode='HTML'
+    )
+    return AGUARDAR_TELEFONE
+
+async def aguardar_telefone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    telefone = update.message.text.strip()
+
+    if not PHONE_REGEX.match(telefone):
+        await update.message.reply_text(
+            "❌ Número inválido. Por favor envia um número válido (ex: <code>912345678</code>):",
+            parse_mode='HTML'
+        )
+        return AGUARDAR_TELEFONE
+
+    # Garantir que o jogador existe antes de atualizar o telefone
+    if not db.get_jogador(user.id):
+        db.save_jogador(user.id, user.full_name)
+    db.update_phone_jogador(user.id, telefone)
+
+    await update.message.reply_text(
+        f"✅ Telefone <code>{telefone}</code> guardado com sucesso!\n"
+        "Os teus parceiros já te podem encontrar pelo número de telefone.",
+        parse_mode='HTML'
+    )
+    return ConversationHandler.END
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -341,7 +425,6 @@ async def comando_criar_torneio(update: Update, context: ContextTypes.DEFAULT_TY
             return
 
         # Detectar se o penúltimo arg é hora (HH:MM) e o antepenúltimo é data (DD/MM/AAAA)
-        import re
         data_hora = None
         if len(args) >= 4 and re.match(r'^\d{2}/\d{2}/\d{4}$', args[-3]) and re.match(r'^\d{2}:\d{2}$', args[-2]):
             vagas = int(args[-1])

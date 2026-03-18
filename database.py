@@ -77,11 +77,24 @@ def save_jogador(telegram_id, nome, phone_number=None):
             (telegram_id, nome, phone_number)
         )
 
+def _sort_key_torneio(row):
+    data_hora = row[3]
+    if not data_hora:
+        return (1, '')
+    try:
+        parts = data_hora.split(' ')
+        d, m, y = parts[0].split('/')
+        time_part = parts[1] if len(parts) > 1 else '00:00'
+        return (0, f"{y}/{m}/{d} {time_part}")
+    except Exception:
+        return (1, '')
+
 def get_torneios():
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT id, nome, vagas, data_hora FROM torneios")
-        return cursor.fetchall()
+        rows = cursor.fetchall()
+    return sorted(rows, key=_sort_key_torneio)
 
 def get_torneio(torneio_id):
     with get_connection() as conn:
@@ -116,6 +129,45 @@ def get_inscritos_nomes(torneio_id):
             ORDER BY i.suplente ASC, i.id ASC
         ''', (torneio_id,))
         return cursor.fetchall()
+
+def get_inscricao_info(user_id, torneio_id):
+    """Retorna (posicao, suplente) da inscrição ou None se não inscrito."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT posicao, suplente FROM inscricoes WHERE id_jogador = ? AND id_torneio = ?",
+            (user_id, torneio_id)
+        )
+        return cursor.fetchone()
+
+def get_primeiro_suplente(torneio_id):
+    """Retorna (telegram_id, nome) do primeiro suplente em fila ou None."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            '''SELECT i.id_jogador, j.nome FROM inscricoes i
+               JOIN jogadores j ON j.telegram_id = i.id_jogador
+               WHERE i.id_torneio = ? AND i.suplente = 1
+               ORDER BY i.id ASC LIMIT 1''',
+            (torneio_id,)
+        )
+        return cursor.fetchone()
+
+def promover_suplente(user_id, torneio_id):
+    """Promove um suplente a titular."""
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE inscricoes SET suplente = 0 WHERE id_jogador = ? AND id_torneio = ?",
+            (user_id, torneio_id)
+        )
+
+def update_phone_jogador(telegram_id, phone_number):
+    """Atualiza o número de telefone de um jogador."""
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE jogadores SET phone_number = ? WHERE telegram_id = ?",
+            (phone_number, telegram_id)
+        )
 
 def remove_inscricao(user_id, torneio_id):
     with get_connection() as conn:

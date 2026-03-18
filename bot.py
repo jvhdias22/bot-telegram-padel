@@ -55,6 +55,17 @@ def main():
     app.add_handler(CallbackQueryHandler(handlers.sair_torneio, pattern='^sair_'))
     app.add_handler(CallbackQueryHandler(handlers.ajuda, pattern='^ajuda$'))
     app.add_handler(CallbackQueryHandler(handlers.admin_panel, pattern='^admin_panel$'))
+    app.add_handler(CallbackQueryHandler(handlers.perfil, pattern='^perfil$'))
+
+    conv_handler_telefone = ConversationHandler(
+        entry_points=[CallbackQueryHandler(handlers.atualizar_telefone, pattern='^atualizar_telefone$')],
+        states={
+            handlers.AGUARDAR_TELEFONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.aguardar_telefone)],
+        },
+        fallbacks=[CommandHandler('start', handlers.start)],
+    )
+
+    app.add_handler(conv_handler_telefone)
 
     # Error Handler
     async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
